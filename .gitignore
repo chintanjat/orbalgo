@@ -1,0 +1,8 @@
+.env
+*.sqlite3
+api-scrip-master-detailed.csv
+__pycache__/
+*.pyc
+.venv/
+.pytest_cache/
+.DS_Store
