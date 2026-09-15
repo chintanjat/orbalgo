@@ -49,11 +49,11 @@ jobs:
           chmod 700 ~/.ssh
 
           printf '%s' "${{ secrets.DO_SSH_KEY_B64 }}" | base64 --decode > ~/.ssh/id_ed25519
-chmod 600 ~/.ssh/id_ed25519
+          chmod 600 ~/.ssh/id_ed25519
 
           ssh-keyscan -H "${{ secrets.DO_HOST }}" >> ~/.ssh/known_hosts
           chmod 600 ~/.ssh/known_hosts
-
+          
       - name: Deploy OR15
         shell: bash
         run: |
