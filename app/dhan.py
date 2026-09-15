@@ -72,14 +72,14 @@ class DhanClient:
 
     async def quote(self, security_id: str) -> dict:
         await self._throttle_quote_api()
-        data = await self._request("POST", "/marketfeed/quote", json={"NSE_FNO": [str(security_id)]}, quote=True)
+        data = await self._request("POST", "/marketfeed/quote", json={"NSE_FNO": [int(security_id)]}, quote=True)
         return ((data.get("data") or {}).get("NSE_FNO") or {}).get(str(security_id)) or {}
 
     async def ltp(self, security_ids: list[str]) -> dict[str, float]:
         if not security_ids:
             return {}
         await self._throttle_quote_api()
-        data = await self._request("POST", "/marketfeed/ltp", json={"NSE_FNO": security_ids}, quote=True)
+        data = await self._request("POST", "/marketfeed/ltp", json={"NSE_FNO": [int(x) for x in security_ids]}, quote=True)
         raw = (data.get("data") or {}).get("NSE_FNO") or {}
         return {str(k): float(v.get("last_price") or 0) for k, v in raw.items()}
 
