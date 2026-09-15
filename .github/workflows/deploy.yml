@@ -1,6 +1,4 @@
-from pathlib import Path
-
-workflow = """name: Test and Deploy OR15
+name: Test and Deploy OR15
 
 on:
   push:
@@ -50,7 +48,7 @@ jobs:
           mkdir -p ~/.ssh
           chmod 700 ~/.ssh
 
-          printf '%s\\n' "${{ secrets.DO_SSH_KEY }}" > ~/.ssh/id_ed25519
+          printf '%s\n' "${{ secrets.DO_SSH_KEY }}" > ~/.ssh/id_ed25519
           chmod 600 ~/.ssh/id_ed25519
 
           ssh-keyscan -H "${{ secrets.DO_HOST }}" >> ~/.ssh/known_hosts
@@ -65,7 +63,3 @@ jobs:
             -o ConnectTimeout=10 \
             "${{ secrets.DO_USER }}@${{ secrets.DO_HOST }}" \
             "/usr/local/bin/deploy-orbalgo"
-"""
-path = Path("/mnt/data/deploy.yml")
-path.write_text(workflow)
-print(path)
