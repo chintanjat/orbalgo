@@ -1,11 +1,22 @@
 from __future__ import annotations
 
 import asyncio
+import base64
+import hashlib
+import hmac
+import logging
+import struct
+import time
+from datetime import datetime, timedelta, timezone
 from typing import Any
+from zoneinfo import ZoneInfo
 
 import httpx
 
 from .config import Settings
+
+log = logging.getLogger("or15.dhan")
+IST = ZoneInfo("Asia/Kolkata")
 
 
 class DhanError(RuntimeError):
@@ -16,16 +27,108 @@ class DhanClient:
     def __init__(self, settings: Settings, transport: httpx.AsyncBaseTransport | None = None):
         self.settings = settings
         self.client = httpx.AsyncClient(base_url=settings.dhan_base_url, timeout=10.0, transport=transport)
+        self._token_lock = asyncio.Lock()
+        self._access_token = settings.dhan_access_token.strip()
+        self._token_expiry_utc: datetime | None = None
         self._quote_lock = asyncio.Lock()
         self._last_quote_at = 0.0
 
     async def close(self):
         await self.client.aclose()
 
-    def _headers(self, *, quote: bool = False) -> dict[str, str]:
-        if not self.settings.dhan_access_token:
-            raise DhanError("DHAN_ACCESS_TOKEN is not configured")
-        h = {"access-token": self.settings.dhan_access_token, "Content-Type": "application/json", "Accept": "application/json"}
+    @property
+    def auto_auth_configured(self) -> bool:
+        return bool(self.settings.dhan_client_id and self.settings.dhan_pin and self.settings.dhan_totp_secret)
+
+    @staticmethod
+    def _totp(secret: str, *, at_time: int | None = None) -> str:
+        cleaned = "".join(secret.split()).upper()
+        if not cleaned:
+            raise DhanError("DHAN_TOTP_SECRET is blank")
+        padding = "=" * ((8 - len(cleaned) % 8) % 8)
+        try:
+            key = base64.b32decode(cleaned + padding, casefold=True)
+        except Exception as exc:
+            raise DhanError("DHAN_TOTP_SECRET is not valid Base32") from exc
+        unix_time = int(time.time() if at_time is None else at_time)
+        counter = unix_time // 30
+        digest = hmac.new(key, struct.pack(">Q", counter), hashlib.sha1).digest()
+        offset = digest[-1] & 0x0F
+        code = (struct.unpack(">I", digest[offset:offset + 4])[0] & 0x7FFFFFFF) % 1_000_000
+        return f"{code:06d}"
+
+    @staticmethod
+    def _parse_expiry(value: Any) -> datetime | None:
+        if not value:
+            return None
+        text = str(value).strip().replace("Z", "+00:00")
+        try:
+            dt = datetime.fromisoformat(text)
+        except ValueError:
+            return None
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=IST)
+        return dt.astimezone(timezone.utc)
+
+    def _token_needs_refresh(self) -> bool:
+        if not self._access_token:
+            return True
+        if not self.auto_auth_configured:
+            return False
+        if self._token_expiry_utc is None:
+            return True
+        return datetime.now(timezone.utc) >= self._token_expiry_utc - timedelta(minutes=5)
+
+    async def _generate_access_token(self) -> str:
+        if not self.settings.dhan_client_id:
+            raise DhanError("DHAN_CLIENT_ID is not configured")
+        if not self.settings.dhan_pin:
+            raise DhanError("DHAN_PIN is not configured")
+        if not self.settings.dhan_totp_secret:
+            raise DhanError("DHAN_TOTP_SECRET is not configured")
+
+        response = await self.client.request(
+            "POST",
+            self.settings.dhan_auth_url,
+            params={
+                "dhanClientId": self.settings.dhan_client_id,
+                "pin": self.settings.dhan_pin,
+                "totp": self._totp(self.settings.dhan_totp_secret),
+            },
+            headers={"Accept": "application/json"},
+        )
+        if response.status_code >= 400:
+            raise DhanError(f"Dhan TOTP token generation -> {response.status_code}: {response.text[:500]}")
+
+        data = response.json()
+        token = str(data.get("accessToken") or "").strip()
+        if not token:
+            raise DhanError(f"Dhan TOTP token generation returned no accessToken: {data}")
+
+        self._access_token = token
+        self._token_expiry_utc = self._parse_expiry(data.get("expiryTime"))
+        if self._token_expiry_utc is None:
+            self._token_expiry_utc = datetime.now(timezone.utc) + timedelta(hours=23)
+        log.info("generated Dhan access token via TOTP; expires_at=%s", self._token_expiry_utc.isoformat())
+        return self._access_token
+
+    async def ensure_authenticated(self, *, force_refresh: bool = False) -> str:
+        if not force_refresh and not self._token_needs_refresh():
+            return self._access_token
+        if not self.auto_auth_configured:
+            if self._access_token:
+                return self._access_token
+            raise DhanError(
+                "Dhan auth is not configured. Set DHAN_ACCESS_TOKEN, or configure "
+                "DHAN_CLIENT_ID + DHAN_PIN + DHAN_TOTP_SECRET."
+            )
+        async with self._token_lock:
+            if not force_refresh and not self._token_needs_refresh():
+                return self._access_token
+            return await self._generate_access_token()
+
+    def _headers(self, token: str, *, quote: bool = False) -> dict[str, str]:
+        h = {"access-token": token, "Content-Type": "application/json", "Accept": "application/json"}
         if quote:
             if not self.settings.dhan_client_id:
                 raise DhanError("DHAN_CLIENT_ID is not configured")
@@ -33,7 +136,11 @@ class DhanClient:
         return h
 
     async def _request(self, method: str, path: str, *, json: Any = None, quote: bool = False) -> Any:
-        r = await self.client.request(method, path, headers=self._headers(quote=quote), json=json)
+        token = await self.ensure_authenticated()
+        r = await self.client.request(method, path, headers=self._headers(token, quote=quote), json=json)
+        if r.status_code == 401 and self.auto_auth_configured:
+            token = await self.ensure_authenticated(force_refresh=True)
+            r = await self.client.request(method, path, headers=self._headers(token, quote=quote), json=json)
         if r.status_code >= 400:
             raise DhanError(f"Dhan {method} {path} -> {r.status_code}: {r.text[:500]}")
         if not r.content:

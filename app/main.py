@@ -42,6 +42,7 @@ async def stop_supervisor(stop_event: asyncio.Event):
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     instruments.load_cached()
+    await dhan.ensure_authenticated()
     stop_event = asyncio.Event()
     task = asyncio.create_task(stop_supervisor(stop_event))
     yield

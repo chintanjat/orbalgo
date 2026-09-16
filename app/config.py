@@ -16,7 +16,10 @@ class Settings(BaseSettings):
 
     dhan_client_id: str = ""
     dhan_access_token: str = ""
+    dhan_pin: str = ""
+    dhan_totp_secret: str = ""
     dhan_base_url: str = "https://api.dhan.co/v2"
+    dhan_auth_url: str = "https://auth.dhan.co/app/generateAccessToken"
 
     nifty_lots: int = Field(default=1, ge=1)
     banknifty_lots: int = Field(default=1, ge=1)
@@ -52,8 +55,13 @@ class Settings(BaseSettings):
         if self.execution_mode == "live":
             if self.webhook_secret in {"change-me", "replace-with-a-long-random-secret"} or len(self.webhook_secret) < 16:
                 raise ValueError("LIVE mode requires a non-default WEBHOOK_SECRET of at least 16 characters")
-            if not self.dhan_client_id or not self.dhan_access_token:
-                raise ValueError("LIVE mode requires DHAN_CLIENT_ID and DHAN_ACCESS_TOKEN")
+            static_auth = bool(self.dhan_client_id and self.dhan_access_token)
+            auto_auth = bool(self.dhan_client_id and self.dhan_pin and self.dhan_totp_secret)
+            if not (static_auth or auto_auth):
+                raise ValueError(
+                    "LIVE mode requires DHAN_CLIENT_ID plus either DHAN_ACCESS_TOKEN "
+                    "or DHAN_PIN + DHAN_TOTP_SECRET"
+                )
         return self
 
     def lots_for(self, underlying: str) -> int:
